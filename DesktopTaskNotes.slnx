@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="DesktopTaskNotes/DesktopTaskNotes.csproj" />
+  <Project Path="DesktopTaskNotes.Tests/DesktopTaskNotes.Tests.csproj" />
+</Solution>
