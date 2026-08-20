@@ -109,7 +109,8 @@ public partial class ManagerWindow : Window
         if (NotesGrid.SelectedItem is not NoteSummary summary) return;
         var note = await _database.GetNoteAsync(summary.Id);
         if (note is null) return;
-        var dialog = new NoteEditorDialog(note) { Owner = this };
+        var dialog = new NoteEditorDialog(_database, note) { Owner = this };
+        await dialog.RestoreWindowSizeAsync();
         if (dialog.ShowDialog() != true) return;
         note.Title = dialog.NoteTitle;
         note.Kind = dialog.NoteKind;

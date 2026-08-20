@@ -41,7 +41,8 @@ public sealed class WindowManager
     public async Task CreateNoteAsync(NoteKind kind, Window? owner = null)
     {
         var temporary = new StickyNote { Kind = kind, Color = kind == NoteKind.Project ? "#DDEEFF" : "#FFF2A8" };
-        var dialog = new NoteEditorDialog(temporary) { Owner = owner };
+        var dialog = new NoteEditorDialog(_database, temporary) { Owner = owner };
+        await dialog.RestoreWindowSizeAsync();
         if (dialog.ShowDialog() != true) return;
         var note = await _database.CreateNoteAsync(dialog.NoteKind, dialog.NoteTitle, dialog.NoteColor);
         note.ProjectDueAt = dialog.ProjectDueAt;
