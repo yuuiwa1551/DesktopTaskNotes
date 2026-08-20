@@ -294,7 +294,8 @@ public partial class StickyNoteWindow : Window
 
     private async Task EditNoteAsync()
     {
-        var dialog = new NoteEditorDialog(Note) { Owner = this };
+        var dialog = new NoteEditorDialog(_database, Note) { Owner = this };
+        await dialog.RestoreWindowSizeAsync();
         if (dialog.ShowDialog() != true) return;
         Note.Title = dialog.NoteTitle;
         Note.Kind = dialog.NoteKind;
