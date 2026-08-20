@@ -18,4 +18,6 @@ dotnet run --project DesktopTaskNotes.Tests/DesktopTaskNotes.Tests.csproj -c Rel
 dotnet publish DesktopTaskNotes/DesktopTaskNotes.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish
 ```
 
+发布后请直接运行 `DesktopTaskNotes.exe`。不要通过 `dotnet DesktopTaskNotes.dll` 启动，否则 `dotnet.exe` 会同时显示控制台窗口。
+
 数据默认保存在 `%LOCALAPPDATA%\DesktopTaskNotes`，自动备份默认保存在“文档\桌面事项贴备份”。应用不包含任何网络功能。

@@ -55,6 +55,12 @@ public static class StartupService
         if (string.IsNullOrWhiteSpace(entryAssembly))
             throw new InvalidOperationException("无法确定应用程序文件路径。");
 
+        // Prefer the Windows GUI app host produced beside the managed DLL. Launching
+        // the DLL through dotnet.exe also launches dotnet's console window.
+        var appHost = Path.ChangeExtension(entryAssembly, ".exe");
+        if (File.Exists(appHost))
+            return (appHost, null);
+
         return (executable, $"\"{entryAssembly}\"");
     }
 }
