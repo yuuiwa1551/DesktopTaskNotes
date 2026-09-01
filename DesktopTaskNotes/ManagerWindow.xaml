@@ -25,9 +25,13 @@
           <TextBlock Text="把今天放在眼前，把长期任务稳稳推进" FontSize="12" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,3,0,0" />
         </StackPanel>
       </StackPanel>
-      <Grid Grid.Column="1" VerticalAlignment="Center">
+      <Grid x:Name="SearchContainer" Grid.Column="1" VerticalAlignment="Center">
         <TextBox x:Name="SearchBox" MinHeight="40" Padding="38,7,12,7" Margin="0"
-                 ToolTip="搜索便利贴、待办和备注" TextChanged="SearchBox_TextChanged" />
+                 ToolTip="搜索便利贴与待办" TextChanged="SearchBox_TextChanged"
+                 AutomationProperties.Name="搜索便利贴与待办" />
+        <TextBlock x:Name="SearchPlaceholder" Text="搜索便利贴与待办" Margin="38,0,12,0"
+                   Foreground="#98A2B3" FontSize="12" VerticalAlignment="Center"
+                   IsHitTestVisible="False" />
         <TextBlock Text="&#xE721;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource TextSecondaryBrush}"
                    FontSize="15" Margin="14,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
                    IsHitTestVisible="False" />
@@ -62,12 +66,12 @@
               <DataGrid x:Name="NotesGrid" MouseDoubleClick="NotesGrid_MouseDoubleClick"
                         SelectionChanged="GridSelection_Changed">
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" />
-                  <DataGridTextColumn Header="类型" Binding="{Binding KindDisplay}" Width="90" />
-                  <DataGridTextColumn Header="未完成" Binding="{Binding ActiveCount}" Width="80" />
-                  <DataGridTextColumn Header="已勾选" Binding="{Binding CompletedCount}" Width="80" />
-                  <DataGridTextColumn Header="显示状态" Binding="{Binding VisibilityDisplay}" Width="94" />
-                  <DataGridTextColumn Header="窗口模式" Binding="{Binding ModeDisplay}" Width="104" />
+                  <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="类型" Binding="{Binding KindDisplay}" Width="90" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="未完成" Binding="{Binding ActiveCount}" Width="80" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="已勾选" Binding="{Binding CompletedCount}" Width="80" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="显示状态" Binding="{Binding VisibilityDisplay}" Width="94" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="窗口模式" Binding="{Binding ModeDisplay}" Width="104" ElementStyle="{StaticResource DataGridTextStyle}" />
                 </DataGrid.Columns>
               </DataGrid>
               <TextBlock x:Name="NotesEmptyState" Text="还没有便利贴，先从右上角新建一张"
@@ -102,10 +106,10 @@
               <DataGrid x:Name="ItemsGrid" MouseDoubleClick="ItemsGrid_MouseDoubleClick"
                         SelectionChanged="GridSelection_Changed">
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="便利贴" Binding="{Binding NoteTitle}" Width="180" />
-                  <DataGridTextColumn Header="待办" Binding="{Binding Text}" Width="*" />
-                  <DataGridTextColumn Header="提醒" Binding="{Binding ReminderDisplay}" Width="150" />
-                  <DataGridTextColumn Header="状态" Binding="{Binding StateDisplay}" Width="90" />
+                  <DataGridTextColumn Header="便利贴" Binding="{Binding NoteTitle}" Width="180" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="待办" Binding="{Binding Text}" Width="*" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="提醒" Binding="{Binding ReminderDisplay}" Width="150" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="状态" Binding="{Binding StateDisplay}" Width="90" ElementStyle="{StaticResource DataGridTextStyle}" />
                 </DataGrid.Columns>
               </DataGrid>
               <TextBlock x:Name="ItemsEmptyState" Text="当前没有匹配的待办"
@@ -134,9 +138,9 @@
             <Grid>
               <DataGrid x:Name="ArchiveGrid" SelectionChanged="GridSelection_Changed">
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="原便利贴" Binding="{Binding NoteTitle}" Width="180" />
-                  <DataGridTextColumn Header="事项" Binding="{Binding Text}" Width="*" />
-                  <DataGridTextColumn Header="归档时间" Binding="{Binding ArchivedAt, StringFormat={}{0:yyyy-MM-dd HH:mm}}" Width="160" />
+                  <DataGridTextColumn Header="原便利贴" Binding="{Binding NoteTitle}" Width="180" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="事项" Binding="{Binding Text}" Width="*" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="归档时间" Binding="{Binding ArchivedAt, StringFormat={}{0:yyyy-MM-dd HH:mm}}" Width="160" ElementStyle="{StaticResource DataGridTextStyle}" />
                 </DataGrid.Columns>
               </DataGrid>
               <TextBlock x:Name="ArchiveEmptyState" Text="还没有归档事项"
@@ -165,9 +169,9 @@
             <Grid>
               <DataGrid x:Name="TrashGrid" SelectionChanged="GridSelection_Changed">
                 <DataGrid.Columns>
-                  <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" />
-                  <DataGridTextColumn Header="类型" Binding="{Binding KindDisplay}" Width="100" />
-                  <DataGridTextColumn Header="删除时间" Binding="{Binding DeletedAt, StringFormat={}{0:yyyy-MM-dd HH:mm}}" Width="170" />
+                  <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="*" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="类型" Binding="{Binding KindDisplay}" Width="100" ElementStyle="{StaticResource DataGridTextStyle}" />
+                  <DataGridTextColumn Header="删除时间" Binding="{Binding DeletedAt, StringFormat={}{0:yyyy-MM-dd HH:mm}}" Width="170" ElementStyle="{StaticResource DataGridTextStyle}" />
                 </DataGrid.Columns>
               </DataGrid>
               <TextBlock x:Name="TrashEmptyState" Text="回收站是空的"
@@ -193,7 +197,8 @@
               <StackPanel>
                 <TextBlock Text="启动与提醒" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
                 <CheckBox x:Name="StartupCheckBox" Content="登录 Windows 后自动启动并驻留托盘"
-                          Margin="0,13,0,0" Checked="StartupCheckBox_Changed" Unchecked="StartupCheckBox_Changed" />
+                          Margin="0,13,0,0" Style="{StaticResource SwitchCheckBoxStyle}"
+                          Checked="StartupCheckBox_Changed" Unchecked="StartupCheckBox_Changed" />
               </StackPanel>
             </Border>
 
@@ -202,9 +207,9 @@
                 <TextBlock Text="数据备份" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
                 <TextBlock x:Name="BackupPathText" Margin="0,8,0,12" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                 <WrapPanel>
-                  <Button Content="立即备份" Click="BackupNow_Click" Style="{StaticResource PrimaryButtonStyle}" />
-                  <Button Content="导出备份…" Click="ExportBackup_Click" />
-                  <Button Content="从备份恢复…" Click="RestoreBackup_Click" />
+                  <Button x:Name="BackupNowButton" Content="立即备份" Click="BackupNow_Click" Style="{StaticResource PrimaryButtonStyle}" />
+                  <Button x:Name="ExportBackupButton" Content="导出备份…" Click="ExportBackup_Click" />
+                  <Button x:Name="RestoreBackupButton" Content="从备份恢复…" Click="RestoreBackup_Click" />
                 </WrapPanel>
                 <TextBlock x:Name="SettingsStatusText" Margin="4,10,0,0" Foreground="{StaticResource SuccessBrush}" TextWrapping="Wrap" />
               </StackPanel>

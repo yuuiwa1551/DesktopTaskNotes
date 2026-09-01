@@ -9,6 +9,32 @@ try
     var database = new DatabaseService(paths.DatabasePath);
     await database.InitializeAsync();
 
+    var workArea = new SnapRectangle(0, 0, 1920, 1080);
+    var edgeSnapped = WindowSnapService.Snap(
+        new SnapRectangle(8, 100, 308, 500), workArea, [], 14);
+    Assert(edgeSnapped.Left == 0, "便利贴靠近屏幕左侧时应精确吸附到工作区边缘");
+
+    var cornerSnapped = WindowSnapService.Snap(
+        new SnapRectangle(1610, 674, 1910, 1074), workArea, [], 14);
+    Assert(cornerSnapped.Right == workArea.Right && cornerSnapped.Bottom == workArea.Bottom,
+        "便利贴靠近屏幕右下角时应同时贴齐两条边");
+
+    var obstacle = new SnapRectangle(100, 100, 400, 500);
+    var noteSnapped = WindowSnapService.Snap(
+        new SnapRectangle(408, 130, 708, 530), workArea, [obstacle], 14);
+    Assert(noteSnapped.Left == obstacle.Right && !noteSnapped.Intersects(obstacle),
+        "两张便利贴靠近时应吸在一起且不重叠");
+
+    var collisionResolved = WindowSnapService.Snap(
+        new SnapRectangle(350, 150, 650, 550), workArea, [obstacle], 14);
+    Assert(collisionResolved.Left == obstacle.Right && !collisionResolved.Intersects(obstacle),
+        "拖放到另一张便利贴上时应按最短方向推出碰撞区域");
+
+    var crossingMonitor = WindowSnapService.Snap(
+        new SnapRectangle(1800, 200, 2100, 600), workArea, [], 14, false);
+    Assert(crossingMonitor.Left == 1800 && crossingMonitor.Right == 2100,
+        "实时吸附不应把正在跨显示器拖动的便利贴锁回原屏幕");
+
     var initialNotes = await database.GetActiveNotesAsync();
     Assert(initialNotes.Count == 1, "首次启动应创建一张欢迎便利贴");
 
@@ -30,14 +56,24 @@ try
     await database.UndoArchiveAsync(archived);
     Assert((await database.GetItemsForNoteAsync(project.Id)).Count == 2, "撤销清理应恢复事项");
 
-    await database.ReorderItemAsync(first.Id, second.Id);
+    await database.ReorderItemAsync(first.Id, second.Id, insertAfter: true);
     var reordered = await database.GetItemsForNoteAsync(project.Id);
-    Assert(reordered[0].Id == second.Id, "拖放排序应交换事项顺序");
+    Assert(reordered[0].Id == second.Id, "拖放排序应移动到目标项之后");
+
+    var third = await database.AddItemAsync(project.Id, "第三阶段");
+    var fourth = await database.AddItemAsync(project.Id, "第四阶段");
+    await database.ReorderItemAsync(second.Id, fourth.Id, true);
+    reordered = await database.GetItemsForNoteAsync(project.Id);
+    Assert(reordered.Select(i => i.Id).SequenceEqual([first.Id, third.Id, fourth.Id, second.Id]),
+        "跨多项拖放应插入到目标位置而不是交换首尾");
 
     var removable = await database.AddItemAsync(project.Id, "误添加事项");
     await database.DeleteItemAsync(removable.Id);
     Assert(!(await database.GetItemsForNoteAsync(project.Id)).Any(i => i.Id == removable.Id),
         "单条待办删除后不应继续显示");
+    await database.RestoreDeletedItemAsync(removable.Id);
+    Assert((await database.GetItemsForNoteAsync(project.Id)).Any(i => i.Id == removable.Id),
+        "刚删除的单条待办应可撤销恢复");
 
     second.Details = "提醒测试备注";
     second.ReminderAt = DateTimeOffset.Now.AddMinutes(-1);
@@ -48,8 +84,26 @@ try
     Assert(!(await database.GetDueRemindersAsync(DateTimeOffset.Now)).Any(r => r.ItemId == second.Id),
         "已经通知的提醒不应重复出现");
 
+    var reminderToCancel = await database.AddItemAsync(project.Id, "完成时取消提醒");
+    reminderToCancel.ReminderAt = DateTimeOffset.Now.AddHours(2);
+    await database.UpdateItemAsync(reminderToCancel);
+    await database.SetItemCompletedAsync(reminderToCancel.Id, true);
+    var completedWithCanceledReminder = (await database.GetItemsForNoteAsync(project.Id))
+        .Single(i => i.Id == reminderToCancel.Id);
+    Assert(completedWithCanceledReminder.ReminderAt is null,
+        "勾选完成后应真正清除尚未触发的提醒");
+
     var found = await database.SearchActiveItemsAsync("提醒测试");
     Assert(found.Any(i => i.Id == second.Id), "搜索应覆盖待办备注");
+    var matchingNotes = await database.GetNoteSummariesAsync(search: "提醒测试");
+    Assert(matchingNotes.Any(n => n.Id == project.Id), "按待办或备注搜索时应返回所属便利贴");
+
+    await database.SetItemCompletedAsync(third.Id, true);
+    var progressBeforeArchive = await database.GetProjectProgressAsync(project.Id);
+    await database.ArchiveCompletedAsync(project.Id);
+    var progressAfterArchive = await database.GetProjectProgressAsync(project.Id);
+    Assert(progressAfterArchive == progressBeforeArchive,
+        "清理已完成后项目累计进度不应归零");
 
     await database.SoftDeleteNoteAsync(project.Id);
     Assert((await database.GetNoteSummariesAsync(true)).Any(n => n.Id == project.Id), "删除后应进入回收站");
@@ -69,7 +123,7 @@ try
     var restoredItems = await restoredDatabase.GetItemsForNoteAsync(project.Id);
     Assert(restoredItems.Single(i => i.Id == second.Id).Text == "第二阶段", "恢复应还原备份时的数据");
 
-    Console.WriteLine("PASS: 14 integration assertions");
+    Console.WriteLine("PASS: 24 integration assertions");
     return 0;
 }
 catch (Exception error)

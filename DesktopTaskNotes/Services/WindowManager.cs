@@ -1,7 +1,9 @@
 using System.Windows;
 using DesktopTaskNotes.Data;
 using DesktopTaskNotes.Dialogs;
+using DesktopTaskNotes.Interop;
 using DesktopTaskNotes.Models;
+using Forms = System.Windows.Forms;
 
 namespace DesktopTaskNotes.Services;
 
@@ -47,6 +49,7 @@ public sealed class WindowManager
         var note = await _database.CreateNoteAsync(dialog.NoteKind, dialog.NoteTitle, dialog.NoteColor);
         note.ProjectDueAt = dialog.ProjectDueAt;
         await _database.UpdateNoteMetadataAsync(note);
+        await PlaceNewNoteOnCurrentScreenAsync(note);
         await ShowNoteAsync(note.Id, true);
         if (_managerWindow?.IsVisible == true) _ = _managerWindow.RefreshAndSelectNoteAsync(note.Id);
     }
@@ -69,9 +72,44 @@ public sealed class WindowManager
             window.Show();
         }
 
+        if (window.WindowState == WindowState.Minimized)
+            window.WindowState = WindowState.Normal;
+
         await window.ReloadAsync();
         if (activate) window.Activate();
         RefreshManager();
+    }
+
+    public bool IsNoteMinimized(Guid noteId) =>
+        _noteWindows.TryGetValue(noteId, out var window) && window.WindowState == WindowState.Minimized;
+
+    internal IReadOnlyList<SnapRectangle> GetSnapTargets(Guid movingNoteId)
+    {
+        var targets = new List<SnapRectangle>();
+        foreach (var (noteId, window) in _noteWindows)
+        {
+            if (noteId == movingNoteId || !window.IsVisible || window.WindowState == WindowState.Minimized)
+                continue;
+            if (WindowNative.TryGetWindowRectangle(window, out var rectangle)) targets.Add(rectangle);
+        }
+        return targets;
+    }
+
+    private async Task PlaceNewNoteOnCurrentScreenAsync(StickyNote note)
+    {
+        var cursor = Forms.Cursor.Position;
+        var screen = Forms.Screen.FromPoint(cursor);
+        var scale = WindowNative.GetScaleForPoint(cursor.X, cursor.Y);
+        var workArea = screen.WorkingArea;
+        var left = workArea.Left / scale.X;
+        var top = workArea.Top / scale.Y;
+        var width = workArea.Width / scale.X;
+        var height = workArea.Height / scale.Y;
+        var cascade = Math.Max(0, note.Left - 120);
+        const double margin = 24;
+        note.Left = Math.Clamp(left + 48 + cascade, left + margin, left + width - note.Width - margin);
+        note.Top = Math.Clamp(top + 48 + cascade, top + margin, top + height - note.Height - margin);
+        await _database.UpdateNoteLayoutAsync(note.Id, note.Left, note.Top, note.Width, note.Height, note.IsCollapsed);
     }
 
     public async Task HideNoteAsync(Guid noteId)
@@ -89,8 +127,8 @@ public sealed class WindowManager
     {
         var note = await _database.GetNoteAsync(noteId);
         if (note is null) return;
-        if (MessageBox.Show(owner, $"把“{note.Title}”移到回收站？30 天内可以恢复。", "移到回收站",
-                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        if (!AppDialog.ShowConfirmation(owner, "移到回收站",
+                $"把“{note.Title}”移到回收站？\n30 天内仍然可以恢复。", "移到回收站", true)) return;
         await _database.SoftDeleteNoteAsync(noteId);
         if (_noteWindows.Remove(noteId, out var window)) window.ForceClose();
         RefreshManager();

@@ -1,6 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Media;
+using DesktopTaskNotes.Interop;
 using DesktopTaskNotes.Models;
 using DesktopTaskNotes.Services;
 using Forms = System.Windows.Forms;
@@ -30,15 +30,15 @@ public partial class TrayMenuWindow : Window
     public void ShowAtCursor()
     {
         if (!IsVisible) Show();
-        var dpi = VisualTreeHelper.GetDpi(this);
         var cursor = Forms.Cursor.Position;
         var workArea = Forms.Screen.FromPoint(cursor).WorkingArea;
-        var left = cursor.X / dpi.DpiScaleX - Width + 8;
-        var top = cursor.Y / dpi.DpiScaleY - Height + 8;
-        Left = Math.Clamp(left, workArea.Left / dpi.DpiScaleX + 8,
-            workArea.Right / dpi.DpiScaleX - Width - 8);
-        Top = Math.Clamp(top, workArea.Top / dpi.DpiScaleY + 8,
-            workArea.Bottom / dpi.DpiScaleY - Height - 8);
+        var scale = WindowNative.GetScaleForPoint(cursor.X, cursor.Y);
+        var left = cursor.X / scale.X - Width + 8;
+        var top = cursor.Y / scale.Y - Height + 8;
+        Left = Math.Clamp(left, workArea.Left / scale.X + 8,
+            workArea.Right / scale.X - Width - 8);
+        Top = Math.Clamp(top, workArea.Top / scale.Y + 8,
+            workArea.Bottom / scale.Y - Height - 8);
         Activate();
     }
 

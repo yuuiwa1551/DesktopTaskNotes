@@ -83,7 +83,7 @@
         <TextBlock x:Name="TitleText" FontSize="15" FontWeight="SemiBold" Foreground="#2D2922"
                    Padding="4,2" Margin="0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                    IsHitTestVisible="False" />
-        <StackPanel x:Name="HeaderButtons" Grid.Column="1" Orientation="Horizontal" Opacity="0.48">
+        <StackPanel x:Name="HeaderButtons" Grid.Column="1" Orientation="Horizontal" Opacity="0.72">
           <Button x:Name="PinButton" Content="&#xE718;" Style="{StaticResource IconButtonStyle}"
                   AutomationProperties.Name="始终置顶"
                   ToolTip="始终置顶" Click="PinButton_Click" />
@@ -126,7 +126,8 @@
           <ItemsControl.ItemTemplate>
             <DataTemplate>
               <Border x:Name="TaskRow" Tag="{Binding Id}" AllowDrop="True" Padding="7,5" Margin="1,3"
-                      CornerRadius="9" Drop="TaskRow_Drop">
+                      CornerRadius="9" DragOver="TaskRow_DragOver" DragLeave="TaskRow_DragLeave"
+                      Drop="TaskRow_Drop">
                 <Border.Style>
                   <Style TargetType="Border">
                     <Setter Property="Background" Value="#42FFFFFF" />
@@ -145,6 +146,8 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                   </Grid.ColumnDefinitions>
                   <TextBlock Text="⠿" Width="17" Margin="0,0,5,0" VerticalAlignment="Center"
                              Foreground="#80786C" FontSize="15" Cursor="SizeAll" ToolTip="拖动排序"
@@ -156,6 +159,9 @@
                             AutomationProperties.Name="标记待办完成"
                             Checked="TaskCheckBox_Changed" Unchecked="TaskCheckBox_Changed" />
                   <TextBox Grid.Column="2" Text="{Binding Text, Mode=OneWay}" TextWrapping="Wrap"
+                           AutomationProperties.Name="{Binding Text}"
+                           AutomationProperties.HelpText="可直接编辑，按 Enter 保存，按 Esc 取消"
+                           PreviewKeyDown="TaskText_PreviewKeyDown"
                            LostKeyboardFocus="TaskText_LostKeyboardFocus">
                     <TextBox.Style>
                       <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
@@ -175,6 +181,56 @@
                       </Style>
                     </TextBox.Style>
                   </TextBox>
+                  <Button Grid.Column="3" Content="&#xE823;" FontFamily="Segoe Fluent Icons"
+                          Width="26" Height="26" Padding="0" Margin="1,0" BorderThickness="0"
+                          ToolTip="设置提醒" AutomationProperties.Name="设置提醒"
+                          Click="ReminderButton_Click">
+                    <Button.Style>
+                      <Style TargetType="Button" BasedOn="{StaticResource IconButtonStyle}">
+                        <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+                        <Setter Property="Opacity" Value="0.78" />
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding ReminderAt}" Value="{x:Null}">
+                            <Setter Property="Opacity" Value="0" />
+                            <Setter Property="IsHitTestVisible" Value="False" />
+                          </DataTrigger>
+                          <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Border}}" Value="True">
+                            <Setter Property="Opacity" Value="1" />
+                            <Setter Property="IsHitTestVisible" Value="True" />
+                          </DataTrigger>
+                          <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter Property="Opacity" Value="1" />
+                            <Setter Property="IsHitTestVisible" Value="True" />
+                          </Trigger>
+                          <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Button.Style>
+                  </Button>
+                  <Button Grid.Column="4" Content="&#xE74D;" FontFamily="Segoe Fluent Icons"
+                          Width="26" Height="26" Padding="0" Margin="1,0" BorderThickness="0"
+                          Foreground="#B42318" ToolTip="删除待办" AutomationProperties.Name="删除待办"
+                          Click="DeleteItem_Click">
+                    <Button.Style>
+                      <Style TargetType="Button" BasedOn="{StaticResource IconButtonStyle}">
+                        <Setter Property="Foreground" Value="#B42318" />
+                        <Setter Property="Opacity" Value="0" />
+                        <Setter Property="IsHitTestVisible" Value="False" />
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Border}}" Value="True">
+                            <Setter Property="Opacity" Value="1" />
+                            <Setter Property="IsHitTestVisible" Value="True" />
+                          </DataTrigger>
+                          <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter Property="Opacity" Value="1" />
+                            <Setter Property="IsHitTestVisible" Value="True" />
+                          </Trigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Button.Style>
+                  </Button>
                 </Grid>
               </Border>
             </DataTemplate>
@@ -194,7 +250,7 @@
           <TextBox x:Name="NewItemBox" ToolTip="输入待办，按 Enter 添加" KeyDown="NewItemBox_KeyDown"
                    TextChanged="NewItemBox_TextChanged" AutomationProperties.Name="新增待办"
                    MaxLength="300" Background="Transparent" BorderThickness="0" Margin="2" Padding="9,5" />
-          <Button Grid.Column="1" Content="&#xE710;" FontFamily="Segoe Fluent Icons" FontSize="13"
+          <Button x:Name="AddItemButton" Grid.Column="1" Content="&#xE710;" FontFamily="Segoe Fluent Icons" FontSize="13"
                   Style="{StaticResource PrimaryButtonStyle}" ToolTip="添加待办" Click="AddItem_Click"
                   AutomationProperties.Name="添加待办"
                   Width="32" Height="32" Padding="0" Margin="3,3,4,3" />
@@ -215,18 +271,17 @@
                 Click="ClearCompleted_Click" Background="#55FFFFFF" BorderBrush="#30FFFFFF" />
       </Grid>
 
-      <!-- Single-level action sheet inspired by Windows Sticky Notes. -->
-      <Grid x:Name="MorePanel" Grid.Row="1" Grid.RowSpan="4" Panel.ZIndex="20" Visibility="Collapsed">
-        <Border Background="#280F172A" MouseLeftButtonDown="MoreBackdrop_MouseLeftButtonDown" />
-        <Border VerticalAlignment="Top" Background="#FEFFFFFF" BorderBrush="#180F172A"
+      <Popup x:Name="MorePopup" PlacementTarget="{Binding ElementName=MoreButton}" Placement="Bottom"
+             AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade">
+        <Border Background="#FEFFFFFF" BorderBrush="#240F172A" Margin="8"
                 BorderThickness="1" CornerRadius="12" Effect="{StaticResource CardShadow}">
           <Grid>
             <Grid.RowDefinitions>
               <RowDefinition Height="54" />
               <RowDefinition Height="1" />
-              <RowDefinition Height="49" />
-              <RowDefinition Height="49" />
-              <RowDefinition Height="49" />
+              <RowDefinition Height="45" />
+              <RowDefinition Height="45" />
+              <RowDefinition Height="45" />
             </Grid.RowDefinitions>
 
             <Grid Margin="5,4">
@@ -307,7 +362,64 @@
             </Button>
           </Grid>
         </Border>
-      </Grid>
+      </Popup>
+
+      <Popup x:Name="ReminderPopup" Placement="Bottom" AllowsTransparency="True"
+             StaysOpen="False" PopupAnimation="Fade">
+        <Border Width="300" Margin="8" Padding="16" Background="#FEFFFFFF"
+                BorderBrush="#240F172A" BorderThickness="1" CornerRadius="12"
+                Effect="{StaticResource CardShadow}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <StackPanel>
+              <TextBlock Text="提醒时间" FontSize="15" FontWeight="SemiBold"
+                         Foreground="{StaticResource TextPrimaryBrush}" />
+              <TextBlock x:Name="ReminderItemText" Margin="0,4,0,0" FontSize="11"
+                         Foreground="{StaticResource TextSecondaryBrush}"
+                         TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+
+            <WrapPanel Grid.Row="1" Margin="0,12,0,10">
+              <Button Content="1 小时后" Height="30" Padding="9,0" Margin="0,0,6,0"
+                      FontSize="11" Tag="relative-01:00" Click="QuickReminder_Click" />
+              <Button Content="明天 09:00" Height="30" Padding="9,0" Margin="0"
+                      FontSize="11" Tag="tomorrow-09:00" Click="QuickReminder_Click" />
+            </WrapPanel>
+
+            <Grid Grid.Row="2">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="82" />
+              </Grid.ColumnDefinitions>
+              <DatePicker x:Name="ReminderDatePicker" Margin="0,0,8,0"
+                          AutomationProperties.Name="提醒日期" />
+              <TextBox x:Name="ReminderTimeBox" Grid.Column="1" Margin="0" MaxLength="5"
+                       HorizontalContentAlignment="Center" AutomationProperties.Name="提醒时间" />
+            </Grid>
+
+            <TextBlock x:Name="ReminderErrorText" Grid.Row="3" Margin="2,8,0,0"
+                       Foreground="{StaticResource DangerBrush}" FontSize="11"
+                       TextWrapping="Wrap" Visibility="Collapsed" />
+
+            <Grid Grid.Row="4" Margin="0,14,0,0">
+              <Button x:Name="ReminderClearButton" Content="清除提醒" HorizontalAlignment="Left"
+                      Height="32" Padding="10,0" Margin="0" Click="ReminderClear_Click" />
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Height="32" Padding="11,0" Margin="0,0,6,0"
+                        Click="ReminderCancel_Click" />
+                <Button Content="保存" Height="32" Padding="13,0" Margin="0"
+                        Style="{StaticResource PrimaryButtonStyle}" Click="ReminderSave_Click" />
+              </StackPanel>
+            </Grid>
+          </Grid>
+        </Border>
+      </Popup>
     </Grid>
   </Border>
 </Window>

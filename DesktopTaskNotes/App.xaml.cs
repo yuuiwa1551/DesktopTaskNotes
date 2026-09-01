@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Threading;
 using System.Windows;
 using DesktopTaskNotes.Data;
+using DesktopTaskNotes.Dialogs;
 using DesktopTaskNotes.Models;
 using DesktopTaskNotes.Services;
 using Forms = System.Windows.Forms;
@@ -49,6 +50,7 @@ public partial class App : Application
 
         try
         {
+            Resources["ApplicationIcon"] = AppIconFactory.CreateImageSource();
             _paths = isIsolatedTest
                 ? new AppPaths(isolatedTestRoot!, Path.Combine(isolatedTestRoot!, "backups"))
                 : new AppPaths();
@@ -75,7 +77,7 @@ public partial class App : Application
         catch (Exception ex)
         {
             WriteErrorLog("启动失败", ex);
-            MessageBox.Show($"桌面事项贴启动失败：\n{ex.Message}", "桌面事项贴", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppDialog.ShowMessage(null, "桌面事项贴启动失败", ex.Message, true);
             ExitApplication(false);
         }
     }
@@ -84,7 +86,7 @@ public partial class App : Application
     {
         _trayIcon = new Forms.NotifyIcon
         {
-            Icon = SystemIcons.Information,
+            Icon = AppIconFactory.CreateTrayIcon(),
             Text = "桌面事项贴",
             Visible = true
         };
@@ -93,6 +95,8 @@ public partial class App : Application
         {
             if (args.Button == Forms.MouseButtons.Right)
                 Dispatcher.Invoke(() => _trayMenuWindow?.ShowAtCursor());
+            else if (args.Button == Forms.MouseButtons.Left)
+                Dispatcher.Invoke(() => _windowManager?.ShowManager());
         };
         _trayIcon.DoubleClick += (_, _) => _windowManager?.ShowManager();
     }
@@ -115,9 +119,9 @@ public partial class App : Application
     public void ExitApplication(bool confirm, bool restart = false)
     {
         if (_exiting) return;
-        if (confirm && MessageBox.Show(
-                "退出后，便利贴和到期提醒都不会显示，直到下次启动。确定退出吗？",
-                "退出桌面事项贴", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+        var owner = Windows.OfType<Window>().FirstOrDefault(window => window.IsActive);
+        if (confirm && !AppDialog.ShowConfirmation(owner, "退出桌面事项贴",
+                "退出后，便利贴和到期提醒都不会显示，直到下次启动。", "退出", true))
             return;
 
         _exiting = true;
@@ -130,6 +134,7 @@ public partial class App : Application
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
+            _trayIcon.Icon?.Dispose();
             _trayIcon.Dispose();
         }
         _activateEvent?.Dispose();

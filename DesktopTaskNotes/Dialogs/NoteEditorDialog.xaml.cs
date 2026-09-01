@@ -67,7 +67,8 @@ public partial class NoteEditorDialog : Window
     {
         if (string.IsNullOrWhiteSpace(TitleBox.Text))
         {
-            MessageBox.Show(this, "请输入便利贴标题。", "桌面事项贴", MessageBoxButton.OK, MessageBoxImage.Information);
+            ValidationText.Text = "请输入便利贴标题。";
+            ValidationText.Visibility = Visibility.Visible;
             TitleBox.Focus();
             return;
         }
@@ -82,6 +83,12 @@ public partial class NoteEditorDialog : Window
     }
 
     private void Type_Checked(object sender, RoutedEventArgs e) => UpdateDueVisibility();
+
+    private void TitleBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (ValidationText is not null && !string.IsNullOrWhiteSpace(TitleBox.Text))
+            ValidationText.Visibility = Visibility.Collapsed;
+    }
 
     private void UpdateDueVisibility()
     {

@@ -80,6 +80,7 @@ public sealed class NoteSummary
     public NoteKind Kind { get; init; }
     public string Title { get; init; } = string.Empty;
     public bool IsHidden { get; init; }
+    public bool IsMinimized { get; set; }
     public NoteWindowMode WindowMode { get; init; }
     public int ActiveCount { get; init; }
     public int CompletedCount { get; init; }
@@ -89,13 +90,14 @@ public sealed class NoteSummary
     public DateTimeOffset? DeletedAt { get; init; }
     public string KindDisplay => Kind == NoteKind.Project ? "项目贴" : "清单贴";
     public string ModeDisplay => WindowMode == NoteWindowMode.Topmost ? "始终置顶" : "桌面模式";
-    public string VisibilityDisplay => IsHidden ? "已隐藏" : "显示中";
+    public string VisibilityDisplay => IsHidden ? "已隐藏" : IsMinimized ? "已最小化" : "显示中";
 }
 
 public sealed class BackupManifest
 {
     public int FormatVersion { get; init; } = 1;
-    public string ApplicationVersion { get; init; } = "1.0.0";
+    public string ApplicationVersion { get; init; } =
+        typeof(BackupManifest).Assembly.GetName().Version?.ToString(3) ?? "1.0.0";
     public DateTimeOffset CreatedAt { get; init; }
     public string DatabaseEntry { get; init; } = "desktop-task-notes.db";
     public string Sha256 { get; init; } = string.Empty;

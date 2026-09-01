@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 using DesktopTaskNotes.Data;
 using DesktopTaskNotes.Dialogs;
@@ -48,16 +49,15 @@ public partial class ManagerWindow : Window
         var preferredArchiveId = (ArchiveGrid.SelectedItem as ArchiveEntry)?.ItemId;
         var preferredTrashId = (TrashGrid.SelectedItem as NoteSummary)?.Id;
 
-        var notesTask = _database.GetNoteSummariesAsync();
+        var notesTask = _database.GetNoteSummariesAsync(search: search);
         var itemsTask = _database.SearchActiveItemsAsync(search);
         var archiveTask = _database.GetArchiveAsync(search);
-        var trashTask = _database.GetNoteSummariesAsync(true);
+        var trashTask = _database.GetNoteSummariesAsync(true, search);
         await Task.WhenAll(notesTask, itemsTask, archiveTask, trashTask);
         if (generation != _refreshGeneration) return;
 
-        var notes = notesTask.Result
-            .Where(n => search.Length == 0 || n.Title.Contains(search, StringComparison.CurrentCultureIgnoreCase))
-            .ToList();
+        var notes = notesTask.Result;
+        foreach (var note in notes) note.IsMinimized = _windowManager.IsNoteMinimized(note.Id);
         var items = itemsTask.Result;
         var archive = archiveTask.Result;
         var trash = trashTask.Result;
@@ -75,6 +75,12 @@ public partial class ManagerWindow : Window
         ItemsEmptyState.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         ArchiveEmptyState.Visibility = archive.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         TrashEmptyState.Visibility = trash.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        NotesEmptyState.Text = search.Length == 0
+            ? "还没有便利贴，先从右上角新建一张"
+            : "没有匹配的便利贴";
+        ItemsEmptyState.Text = search.Length == 0 ? "当前没有待办" : "没有匹配的待办";
+        ArchiveEmptyState.Text = search.Length == 0 ? "还没有归档事项" : "没有匹配的归档事项";
+        TrashEmptyState.Text = search.Length == 0 ? "回收站是空的" : "回收站中没有匹配项";
         UpdateActionStates();
 
         _loadingSettings = true;
@@ -159,14 +165,20 @@ public partial class ManagerWindow : Window
     private async void PermanentDeleteNote_Click(object sender, RoutedEventArgs e)
     {
         if (TrashGrid.SelectedItem is not NoteSummary note) return;
-        if (MessageBox.Show(this, $"永久删除“{note.Title}”及其中全部事项？此操作无法撤销。", "永久删除",
-                MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (!AppDialog.ShowConfirmation(this, "永久删除",
+                $"永久删除“{note.Title}”及其中全部事项？\n此操作无法撤销。", "永久删除", true)) return;
         await _database.PermanentlyDeleteNoteAsync(note.Id);
         await RefreshAsync();
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (SearchPlaceholder is not null)
+        {
+            SearchPlaceholder.Visibility = string.IsNullOrEmpty(SearchBox.Text)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
         if (!IsLoaded) return;
         _searchTimer.Stop();
         _searchTimer.Start();
@@ -179,9 +191,19 @@ public partial class ManagerWindow : Window
         if (!IsInitialized) return;
         var hasNote = NotesGrid.SelectedItem is NoteSummary;
         ShowNoteButton.IsEnabled = hasNote;
-        HideNoteButton.IsEnabled = hasNote;
+        HideNoteButton.IsEnabled = NotesGrid.SelectedItem is NoteSummary { IsHidden: false };
         EditNoteButton.IsEnabled = hasNote;
         DeleteNoteButton.IsEnabled = hasNote;
+        if (NotesGrid.SelectedItem is NoteSummary selectedNote)
+        {
+            ShowNoteButton.Content = selectedNote.IsHidden
+                ? "显示到桌面"
+                : selectedNote.IsMinimized ? "恢复到桌面" : "打开便利贴";
+        }
+        else
+        {
+            ShowNoteButton.Content = "打开便利贴";
+        }
         OpenItemButton.IsEnabled = ItemsGrid.SelectedItem is ChecklistItem;
         RestoreArchiveButton.IsEnabled = ArchiveGrid.SelectedItem is ArchiveEntry;
         var hasTrash = TrashGrid.SelectedItem is NoteSummary;
@@ -191,7 +213,9 @@ public partial class ManagerWindow : Window
 
     private async void MainTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded && e.Source == MainTabs) await RefreshAsync();
+        if (!IsLoaded || e.Source != MainTabs) return;
+        SearchContainer.Visibility = MainTabs.SelectedIndex == 4 ? Visibility.Collapsed : Visibility.Visible;
+        await RefreshAsync();
     }
 
     private async void StartupCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -202,26 +226,32 @@ public partial class ManagerWindow : Window
             var enabled = StartupCheckBox.IsChecked == true;
             StartupService.SetEnabled(enabled);
             await _database.SetSettingAsync("StartWithWindows", enabled ? "true" : "false");
-            SettingsStatusText.Text = enabled ? "已启用开机启动。" : "已关闭开机启动。";
+            SetSettingsStatus(enabled ? "已启用开机启动。" : "已关闭开机启动。", true);
         }
         catch (Exception ex)
         {
-            SettingsStatusText.Text = $"设置失败：{ex.Message}";
+            _loadingSettings = true;
+            StartupCheckBox.IsChecked = StartupService.IsEnabled();
+            _loadingSettings = false;
+            SetSettingsStatus($"设置失败：{ex.Message}", false);
         }
     }
 
     private async void BackupNow_Click(object sender, RoutedEventArgs e)
     {
+        SetBackupBusy(true);
+        SetSettingsStatus("正在创建备份…", null);
         try
         {
             var path = Path.Combine(_paths.BackupDirectory, $"manual-{DateTime.Now:yyyy-MM-dd-HHmmss}.dtnbackup");
             await _backupService.CreateBackupAsync(path);
-            SettingsStatusText.Text = $"备份已保存：{path}";
+            SetSettingsStatus($"备份已保存：{path}", true);
         }
         catch (Exception ex)
         {
-            SettingsStatusText.Text = $"备份失败：{ex.Message}";
+            SetSettingsStatus($"备份失败：{ex.Message}", false);
         }
+        finally { SetBackupBusy(false); }
     }
 
     private async void ExportBackup_Click(object sender, RoutedEventArgs e)
@@ -234,33 +264,58 @@ public partial class ManagerWindow : Window
             DefaultExt = ".dtnbackup"
         };
         if (dialog.ShowDialog(this) != true) return;
+        SetBackupBusy(true);
+        SetSettingsStatus("正在导出备份…", null);
         try
         {
             await _backupService.CreateBackupAsync(dialog.FileName);
-            SettingsStatusText.Text = "备份导出成功。";
+            SetSettingsStatus("备份导出成功。", true);
         }
         catch (Exception ex)
         {
-            SettingsStatusText.Text = $"导出失败：{ex.Message}";
+            SetSettingsStatus($"导出失败：{ex.Message}", false);
         }
+        finally { SetBackupBusy(false); }
     }
 
     private async void RestoreBackup_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Filter = "桌面事项贴备份 (*.dtnbackup)|*.dtnbackup" };
         if (dialog.ShowDialog(this) != true) return;
-        if (MessageBox.Show(this, "恢复会用备份替换当前数据，并在恢复前自动保存一份快照。继续吗？", "恢复备份",
-                MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (!AppDialog.ShowConfirmation(this, "恢复备份",
+                "恢复会用备份替换当前数据，并在恢复前自动保存一份快照。", "开始恢复", true)) return;
+        SetBackupBusy(true);
+        SetSettingsStatus("正在校验并恢复备份…", null);
         try
         {
             await _backupService.RestoreBackupAsync(dialog.FileName);
-            MessageBox.Show(this, "恢复成功，应用将重新启动。", "桌面事项贴", MessageBoxButton.OK, MessageBoxImage.Information);
+            AppDialog.ShowMessage(this, "恢复成功", "数据已经恢复，桌面事项贴将重新启动。");
             ((App)Application.Current).ExitApplication(false, true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"恢复失败：{ex.Message}", "桌面事项贴", MessageBoxButton.OK, MessageBoxImage.Error);
+            AppDialog.ShowMessage(this, "恢复失败", ex.Message, true);
+            SetSettingsStatus($"恢复失败：{ex.Message}", false);
         }
+        finally { SetBackupBusy(false); }
+    }
+
+    private void SetBackupBusy(bool busy)
+    {
+        BackupNowButton.IsEnabled = !busy;
+        ExportBackupButton.IsEnabled = !busy;
+        RestoreBackupButton.IsEnabled = !busy;
+    }
+
+    private void SetSettingsStatus(string message, bool? success)
+    {
+        SettingsStatusText.Text = message;
+        SettingsStatusText.Foreground = success switch
+        {
+            true => (Brush)FindResource("SuccessBrush"),
+            false => (Brush)FindResource("DangerBrush"),
+            _ => (Brush)FindResource("TextSecondaryBrush")
+        };
     }
 
     private void ManagerWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)

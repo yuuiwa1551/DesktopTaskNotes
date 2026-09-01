@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using DesktopTaskNotes.Data;
@@ -9,10 +12,12 @@ using DesktopTaskNotes.Dialogs;
 using DesktopTaskNotes.Interop;
 using DesktopTaskNotes.Models;
 using DesktopTaskNotes.Services;
+using Microsoft.Win32;
 using DragEventArgs = System.Windows.DragEventArgs;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using Point = System.Windows.Point;
+using Forms = System.Windows.Forms;
 
 namespace DesktopTaskNotes;
 
@@ -23,17 +28,35 @@ public partial class StickyNoteWindow : Window
     private readonly ObservableCollection<ChecklistItem> _items = [];
     private readonly DispatcherTimer _layoutSaveTimer;
     private readonly DispatcherTimer _desktopGuardTimer;
+    private readonly DispatcherTimer _undoTimer;
     private readonly bool _exposeForUiTest;
     private Point _dragStart;
     private Guid? _dragItemId;
-    private List<Guid> _lastArchived = [];
+    private List<Guid> _undoItemIds = [];
+    private UndoOperation _undoOperation;
+    private string _undoStatus = string.Empty;
+    private Guid? _reminderItemId;
     private bool _allowClose;
     private bool _loading;
     private bool _applyingCollapsedState;
     private bool _collapsedVisualApplied;
     private bool _manualMinimize;
+    private bool _addingItem;
+    private bool _displayEventsSubscribed;
+    private bool _windowDragInProgress;
+    private bool _restoringUnexpectedMaximize;
+    private HwndSource? _windowSource;
+    private Rect _preDragBounds;
+    private Rect _lastNormalBounds;
     private double _expandedWidth;
     private double _expandedHeight;
+
+    private enum UndoOperation
+    {
+        None,
+        Archive,
+        Delete
+    }
 
     public StickyNoteWindow(DatabaseService database, WindowManager windowManager, StickyNote note)
     {
@@ -54,17 +77,30 @@ public partial class StickyNoteWindow : Window
         };
         _desktopGuardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _desktopGuardTimer.Tick += (_, _) => GuardDesktopVisibility();
+        _undoTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        _undoTimer.Tick += (_, _) => DismissUndo();
 
         if (_exposeForUiTest) ShowInTaskbar = true;
-        else SourceInitialized += (_, _) => WindowNative.ConfigureToolWindow(this);
-        LocationChanged += (_, _) => ScheduleLayoutSave();
+        SourceInitialized += StickyNoteWindow_SourceInitialized;
+        LocationChanged += (_, _) =>
+        {
+            RememberNormalBounds();
+            ScheduleLayoutSave();
+        };
         SizeChanged += Window_SizeChanged;
         StateChanged += Window_StateChanged;
         Loaded += async (_, _) =>
         {
+            ClampToVisibleWorkArea();
+            if (!_displayEventsSubscribed)
+            {
+                SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
+                _displayEventsSubscribed = true;
+            }
             _desktopGuardTimer.Start();
             await ReloadAsync();
         };
+        DpiChanged += (_, _) => _ = Dispatcher.InvokeAsync(ClampToVisibleWorkArea, DispatcherPriority.Loaded);
         Closing += StickyNoteWindow_Closing;
         ApplyNoteState();
     }
@@ -91,9 +127,24 @@ public partial class StickyNoteWindow : Window
             var items = await _database.GetItemsForNoteAsync(Note.Id);
             _items.Clear();
             foreach (var item in items) _items.Add(item);
+            if (_undoOperation == UndoOperation.Archive && _undoItemIds.Count > 0)
+            {
+                _undoItemIds = await _database.FilterArchivedItemIdsAsync(_undoItemIds);
+                if (_undoItemIds.Count == 0) DismissUndo();
+            }
             ApplyNoteState();
-            UpdateProgress();
-            StatusText.Text = $"{_items.Count(i => !i.IsCompleted)} 项未完成";
+            if (Note.Kind == NoteKind.Project)
+            {
+                var progress = await _database.GetProjectProgressAsync(Note.Id);
+                UpdateProgress(progress.Completed, progress.Total);
+            }
+            else
+            {
+                UpdateProgress(0, 0);
+            }
+            StatusText.Text = _undoOperation == UndoOperation.None
+                ? $"{_items.Count(i => !i.IsCompleted)} 项未完成"
+                : _undoStatus;
             CollapsedStatusText.Text = StatusText.Text;
         }
         finally
@@ -107,15 +158,30 @@ public partial class StickyNoteWindow : Window
         if (!IsVisible) Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         await ReloadAsync();
+        if (Note.IsCollapsed)
+        {
+            Note.IsCollapsed = false;
+            ApplyCollapsedState();
+            await SaveLayoutAsync();
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+        }
         Activate();
         foreach (var element in FindVisualChildren<Border>(ItemsList))
         {
             if (element.Tag is Guid id && id == itemId)
             {
                 element.Background = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255));
+                element.BorderBrush = new SolidColorBrush(Color.FromRgb(91, 91, 214));
+                element.BorderThickness = new Thickness(2);
                 element.BringIntoView();
                 var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-                timer.Tick += (_, _) => { timer.Stop(); element.Background = Brushes.Transparent; };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    element.ClearValue(Border.BackgroundProperty);
+                    element.ClearValue(Border.BorderBrushProperty);
+                    element.ClearValue(Border.BorderThicknessProperty);
+                };
                 timer.Start();
                 break;
             }
@@ -126,7 +192,48 @@ public partial class StickyNoteWindow : Window
     {
         _allowClose = true;
         _desktopGuardTimer.Stop();
+        _undoTimer.Stop();
+        if (_displayEventsSubscribed)
+        {
+            SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
+            _displayEventsSubscribed = false;
+        }
+        MorePopup.IsOpen = false;
+        ReminderPopup.IsOpen = false;
+        if (_windowSource is not null)
+        {
+            _windowSource.RemoveHook(WindowMessageHook);
+            _windowSource = null;
+        }
         Close();
+    }
+
+    private void StickyNoteWindow_SourceInitialized(object? sender, EventArgs e)
+    {
+        if (!_exposeForUiTest) WindowNative.ConfigureToolWindow(this);
+        WindowNative.DisableMaximize(this);
+        var handle = new WindowInteropHelper(this).Handle;
+        _windowSource = HwndSource.FromHwnd(handle);
+        _windowSource?.AddHook(WindowMessageHook);
+    }
+
+    private nint WindowMessageHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (WindowNative.IsMaximizeSystemCommand(message, wParam))
+        {
+            handled = true;
+            WindowNative.DisableMaximize(this);
+            return 0;
+        }
+
+        if (message == WindowNative.WmMoving &&
+            WindowNative.SnapMovingRectangle(lParam, _windowManager.GetSnapTargets(Note.Id)))
+        {
+            handled = true;
+            return 1;
+        }
+
+        return 0;
     }
 
     private void ApplyNoteState()
@@ -134,8 +241,9 @@ public partial class StickyNoteWindow : Window
         TitleText.Text = Note.Title;
         NoteBorder.Background = BrushFrom(Note.Color);
         Topmost = Note.WindowMode == NoteWindowMode.Topmost;
-        PinButton.Opacity = Topmost ? 1 : 0.55;
+        PinButton.Opacity = Topmost ? 1 : 0.75;
         PinButton.ToolTip = Topmost ? "取消始终置顶" : "始终置顶";
+        AutomationProperties.SetName(PinButton, Topmost ? "取消始终置顶" : "始终置顶");
         ProjectPanel.Visibility = Note.Kind == NoteKind.Project ? Visibility.Visible : Visibility.Collapsed;
 
         if (!IsLoaded)
@@ -148,13 +256,19 @@ public partial class StickyNoteWindow : Window
         ApplyCollapsedState();
     }
 
-    private void UpdateProgress()
+    private void UpdateProgress(int completed, int total)
     {
-        var total = _items.Count;
-        var completed = _items.Count(i => i.IsCompleted);
         var progress = total == 0 ? 0 : completed * 100d / total;
         ProjectProgress.Value = progress;
-        var due = Note.ProjectDueAt is { } dueAt ? $" · {dueAt.LocalDateTime:MM-dd}" : string.Empty;
+        var due = string.Empty;
+        ProjectProgressText.Foreground = new SolidColorBrush(Color.FromRgb(117, 108, 94));
+        if (Note.ProjectDueAt is { } dueAt)
+        {
+            var localDue = dueAt.LocalDateTime;
+            var overdue = localDue.Date < DateTime.Today && completed < total;
+            due = overdue ? $" · 已逾期 {localDue:MM-dd}" : $" · {localDue:MM-dd}";
+            if (overdue) ProjectProgressText.Foreground = new SolidColorBrush(Color.FromRgb(180, 35, 24));
+        }
         ProjectProgressText.Text = $"{completed}/{total}{due}";
     }
 
@@ -170,6 +284,7 @@ public partial class StickyNoteWindow : Window
             AddPanel.Visibility = visibility;
             Footer.Visibility = visibility;
             ResizeMode = Note.IsCollapsed ? ResizeMode.NoResize : ResizeMode.CanResizeWithGrip;
+            if (_windowSource is not null) WindowNative.DisableMaximize(this);
             CollapseButton.Content = Note.IsCollapsed ? "\uE70E" : "\uE70D";
             if (Note.IsCollapsed)
             {
@@ -204,14 +319,17 @@ public partial class StickyNoteWindow : Window
     {
         Note.WindowMode = Note.WindowMode == NoteWindowMode.Topmost ? NoteWindowMode.Desktop : NoteWindowMode.Topmost;
         Topmost = Note.WindowMode == NoteWindowMode.Topmost;
-        PinButton.Opacity = Topmost ? 1 : 0.55;
+        PinButton.Opacity = Topmost ? 1 : 0.75;
         PinButton.ToolTip = Topmost ? "取消始终置顶" : "始终置顶";
+        AutomationProperties.SetName(PinButton, Topmost ? "取消始终置顶" : "始终置顶");
         await _database.UpdateNoteMetadataAsync(Note);
+        _windowManager.RefreshManager();
     }
 
     private async void CollapseButton_Click(object sender, RoutedEventArgs e)
     {
-        MorePanel.Visibility = Visibility.Collapsed;
+        MorePopup.IsOpen = false;
+        ReminderPopup.IsOpen = false;
         Note.IsCollapsed = !Note.IsCollapsed;
         ApplyCollapsedState();
         await SaveLayoutAsync();
@@ -219,25 +337,21 @@ public partial class StickyNoteWindow : Window
 
     private void MinimizeButton_Click(object sender, RoutedEventArgs e)
     {
-        MorePanel.Visibility = Visibility.Collapsed;
+        MorePopup.IsOpen = false;
+        ReminderPopup.IsOpen = false;
         _manualMinimize = true;
         ShowInTaskbar = true;
         WindowNative.ConfigureTaskbarWindow(this);
         WindowState = WindowState.Minimized;
     }
 
-    private async void MoreButton_Click(object sender, RoutedEventArgs e)
+    private void MoreButton_Click(object sender, RoutedEventArgs e)
     {
-        if (Note.IsCollapsed)
-        {
-            Note.IsCollapsed = false;
-            ApplyCollapsedState();
-            await SaveLayoutAsync();
-        }
-        MorePanel.Visibility = MorePanel.Visibility == Visibility.Visible
-            ? Visibility.Collapsed
-            : Visibility.Visible;
-        if (MorePanel.Visibility == Visibility.Visible) UpdateColorSelection();
+        ReminderPopup.IsOpen = false;
+        MorePopup.Width = Math.Max(250, ActualWidth - 20);
+        MorePopup.HorizontalOffset = -(MorePopup.Width - MoreButton.ActualWidth);
+        MorePopup.IsOpen = !MorePopup.IsOpen;
+        if (MorePopup.IsOpen) UpdateColorSelection();
     }
 
     private async void ColorSwatch_Click(object sender, RoutedEventArgs e)
@@ -252,29 +366,27 @@ public partial class StickyNoteWindow : Window
 
     private async void EditNoteMenu_Click(object sender, RoutedEventArgs e)
     {
-        MorePanel.Visibility = Visibility.Collapsed;
+        MorePopup.IsOpen = false;
         await EditNoteAsync();
     }
 
     private async void HideNoteMenu_Click(object sender, RoutedEventArgs e)
     {
-        MorePanel.Visibility = Visibility.Collapsed;
+        MorePopup.IsOpen = false;
         await _windowManager.HideNoteAsync(Note.Id);
     }
 
     private async void DeleteNoteMenu_Click(object sender, RoutedEventArgs e)
     {
-        MorePanel.Visibility = Visibility.Collapsed;
+        MorePopup.IsOpen = false;
         await _windowManager.DeleteNoteAsync(Note.Id, this);
     }
 
-    private void MoreBackdrop_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) =>
-        MorePanel.Visibility = Visibility.Collapsed;
-
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key != Key.Escape || MorePanel.Visibility != Visibility.Visible) return;
-        MorePanel.Visibility = Visibility.Collapsed;
+        if (e.Key != Key.Escape || (!MorePopup.IsOpen && !ReminderPopup.IsOpen)) return;
+        MorePopup.IsOpen = false;
+        ReminderPopup.IsOpen = false;
         e.Handled = true;
     }
 
@@ -320,26 +432,68 @@ public partial class StickyNoteWindow : Window
 
     private async Task AddItemAsync()
     {
-        if (string.IsNullOrWhiteSpace(NewItemBox.Text)) return;
-        await _database.AddItemAsync(Note.Id, NewItemBox.Text);
-        NewItemBox.Clear();
-        await ReloadAsync();
-        ItemsScroller.ScrollToEnd();
-        NewItemBox.Focus();
-        _windowManager.RefreshManager();
+        if (_addingItem || string.IsNullOrWhiteSpace(NewItemBox.Text)) return;
+        _addingItem = true;
+        var text = NewItemBox.Text;
+        NewItemBox.IsEnabled = false;
+        AddItemButton.IsEnabled = false;
+        try
+        {
+            await _database.AddItemAsync(Note.Id, text);
+            NewItemBox.Clear();
+            await ReloadAsync();
+            ItemsScroller.ScrollToEnd();
+            _windowManager.RefreshManager();
+        }
+        finally
+        {
+            _addingItem = false;
+            NewItemBox.IsEnabled = true;
+            AddItemButton.IsEnabled = true;
+            NewItemBox.Focus();
+        }
     }
 
     private async void TaskCheckBox_Changed(object sender, RoutedEventArgs e)
     {
         if (_loading || sender is not CheckBox { DataContext: ChecklistItem item } checkBox) return;
-        await _database.SetItemCompletedAsync(item.Id, checkBox.IsChecked == true);
-        await ReloadAsync();
-        _windowManager.RefreshManager();
+        checkBox.IsEnabled = false;
+        try
+        {
+            await _database.SetItemCompletedAsync(item.Id, checkBox.IsChecked == true);
+            await ReloadAsync();
+            _windowManager.RefreshManager();
+        }
+        finally
+        {
+            checkBox.IsEnabled = true;
+        }
     }
 
     private async void TaskText_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
     {
         if (_loading || sender is not TextBox { DataContext: ChecklistItem item } box) return;
+        await SaveTaskTextAsync(box, item);
+    }
+
+    private async void TaskText_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox { DataContext: ChecklistItem item } box) return;
+        if (e.Key == Key.Escape)
+        {
+            box.Text = item.Text;
+            Keyboard.ClearFocus();
+            e.Handled = true;
+            return;
+        }
+        if (e.Key != Key.Enter || Keyboard.Modifiers != ModifierKeys.None) return;
+        e.Handled = true;
+        await SaveTaskTextAsync(box, item);
+        Keyboard.ClearFocus();
+    }
+
+    private async Task SaveTaskTextAsync(TextBox box, ChecklistItem item)
+    {
         var value = box.Text.Trim();
         if (value.Length == 0)
         {
@@ -352,40 +506,194 @@ public partial class StickyNoteWindow : Window
         _windowManager.RefreshManager();
     }
 
+    private async void DeleteItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: ChecklistItem item }) return;
+        await _database.DeleteItemAsync(item.Id);
+        await ReloadAsync();
+        ShowUndo(UndoOperation.Delete, [item.Id], "已删除 1 项");
+        _windowManager.RefreshManager();
+    }
+
+    private void ReminderButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: ChecklistItem item } button) return;
+        MorePopup.IsOpen = false;
+        _reminderItemId = item.Id;
+        ReminderPopup.PlacementTarget = button;
+        ReminderPopup.HorizontalOffset = -(300 - button.ActualWidth);
+        ReminderItemText.Text = item.Text;
+        var initial = item.ReminderAt?.LocalDateTime
+                      ?? (DateTime.Now.Hour < 18 ? DateTime.Today.AddHours(18) : DateTime.Today.AddDays(1).AddHours(9));
+        ReminderDatePicker.SelectedDate = initial.Date;
+        ReminderTimeBox.Text = initial.ToString("HH:mm", CultureInfo.InvariantCulture);
+        ReminderClearButton.Visibility = item.ReminderAt is null ? Visibility.Collapsed : Visibility.Visible;
+        ReminderErrorText.Visibility = Visibility.Collapsed;
+        ReminderPopup.IsOpen = true;
+        ReminderDatePicker.Focus();
+    }
+
+    private void QuickReminder_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string tag }) return;
+        if (tag.StartsWith("relative-", StringComparison.Ordinal))
+        {
+            var durationText = tag["relative-".Length..];
+            if (TimeSpan.TryParseExact(durationText, "hh\\:mm", CultureInfo.InvariantCulture, out var duration))
+            {
+                var future = DateTime.Now.Add(duration);
+                ReminderDatePicker.SelectedDate = future.Date;
+                ReminderTimeBox.Text = future.ToString("HH:mm", CultureInfo.InvariantCulture);
+                ReminderErrorText.Visibility = Visibility.Collapsed;
+            }
+            return;
+        }
+        var tomorrow = tag.StartsWith("tomorrow", StringComparison.Ordinal);
+        var timeText = tag[(tag.IndexOf('-') + 1)..];
+        ReminderDatePicker.SelectedDate = DateTime.Today.AddDays(tomorrow ? 1 : 0);
+        ReminderTimeBox.Text = timeText;
+        ReminderErrorText.Visibility = Visibility.Collapsed;
+    }
+
+    private async void ReminderSave_Click(object sender, RoutedEventArgs e)
+    {
+        if (_reminderItemId is not Guid itemId || ReminderDatePicker.SelectedDate is not DateTime date)
+        {
+            ShowReminderError("请选择提醒日期。");
+            return;
+        }
+        if (!TimeSpan.TryParseExact(ReminderTimeBox.Text.Trim(), "hh\\:mm", CultureInfo.InvariantCulture,
+                out var time))
+        {
+            ShowReminderError("时间请按 09:00 这样的格式填写。");
+            return;
+        }
+        var local = date.Date.Add(time);
+        var reminderAt = new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+        if (reminderAt <= DateTimeOffset.Now)
+        {
+            ShowReminderError("提醒时间需要晚于现在。");
+            return;
+        }
+        var item = _items.FirstOrDefault(candidate => candidate.Id == itemId);
+        if (item is null) return;
+        item.ReminderAt = reminderAt;
+        await _database.UpdateItemAsync(item);
+        ReminderPopup.IsOpen = false;
+        await ReloadAsync();
+        _windowManager.RefreshManager();
+    }
+
+    private async void ReminderClear_Click(object sender, RoutedEventArgs e)
+    {
+        if (_reminderItemId is not Guid itemId) return;
+        var item = _items.FirstOrDefault(candidate => candidate.Id == itemId);
+        if (item is null) return;
+        item.ReminderAt = null;
+        await _database.UpdateItemAsync(item);
+        ReminderPopup.IsOpen = false;
+        await ReloadAsync();
+        _windowManager.RefreshManager();
+    }
+
+    private void ReminderCancel_Click(object sender, RoutedEventArgs e) => ReminderPopup.IsOpen = false;
+
+    private void ShowReminderError(string message)
+    {
+        ReminderErrorText.Text = message;
+        ReminderErrorText.Visibility = Visibility.Visible;
+    }
+
     private async void ClearCompleted_Click(object sender, RoutedEventArgs e)
     {
-        _lastArchived = await _database.ArchiveCompletedAsync(Note.Id);
-        if (_lastArchived.Count == 0)
+        var archived = await _database.ArchiveCompletedAsync(Note.Id);
+        if (archived.Count == 0)
         {
             StatusText.Text = "没有已完成事项";
             return;
         }
-        StatusText.Text = $"已清理 {_lastArchived.Count} 项";
-        UndoButton.Visibility = Visibility.Visible;
         await ReloadAsync();
-        StatusText.Text = $"已清理 {_lastArchived.Count} 项";
-        UndoButton.Visibility = Visibility.Visible;
+        ShowUndo(UndoOperation.Archive, archived, $"已清理 {archived.Count} 项");
         _windowManager.RefreshManager();
     }
 
     private async void UndoButton_Click(object sender, RoutedEventArgs e)
     {
-        await _database.UndoArchiveAsync(_lastArchived);
-        _lastArchived.Clear();
+        if (_undoOperation == UndoOperation.None || _undoItemIds.Count == 0) return;
+        _undoTimer.Stop();
+        UndoButton.IsEnabled = false;
+        try
+        {
+            if (_undoOperation == UndoOperation.Archive)
+                await _database.UndoArchiveAsync(_undoItemIds);
+            else if (_undoOperation == UndoOperation.Delete)
+                foreach (var id in _undoItemIds) await _database.RestoreDeletedItemAsync(id);
+            _undoOperation = UndoOperation.None;
+            _undoItemIds.Clear();
+            _undoStatus = string.Empty;
+            UndoButton.Visibility = Visibility.Collapsed;
+            await ReloadAsync();
+            _windowManager.RefreshManager();
+        }
+        finally
+        {
+            UndoButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowUndo(UndoOperation operation, IEnumerable<Guid> itemIds, string status)
+    {
+        _undoTimer.Stop();
+        _undoOperation = operation;
+        _undoItemIds = itemIds.ToList();
+        _undoStatus = status;
+        StatusText.Text = status;
+        CollapsedStatusText.Text = status;
+        UndoButton.Visibility = Visibility.Visible;
+        _undoTimer.Start();
+    }
+
+    private void DismissUndo()
+    {
+        _undoTimer.Stop();
+        _undoOperation = UndoOperation.None;
+        _undoItemIds.Clear();
+        _undoStatus = string.Empty;
         UndoButton.Visibility = Visibility.Collapsed;
-        await ReloadAsync();
-        _windowManager.RefreshManager();
+        var normalStatus = $"{_items.Count(i => !i.IsCompleted)} 项未完成";
+        StatusText.Text = normalStatus;
+        CollapsedStatusText.Text = normalStatus;
     }
 
     private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left || e.OriginalSource is not DependencyObject source) return;
         if (FindVisualParent<Button>(source) is not null || FindVisualParent<TextBox>(source) is not null) return;
-        DragMove();
+        _preDragBounds = CurrentNormalBounds();
+        _windowDragInProgress = true;
+        try
+        {
+            DragMove();
+        }
+        catch (InvalidOperationException)
+        {
+            // The mouse button may already have been released before WPF enters its native move loop.
+        }
+        finally
+        {
+            _windowDragInProgress = false;
+            WindowNative.DisableMaximize(this);
+            if (WindowState == WindowState.Maximized)
+                RestoreFromUnexpectedMaximize();
+            else
+                WindowNative.SnapWindow(this, _windowManager.GetSnapTargets(Note.Id));
+            RememberNormalBounds();
+            ScheduleLayoutSave();
+        }
     }
 
     private void Header_MouseEnter(object sender, MouseEventArgs e) => HeaderButtons.Opacity = 1;
-    private void Header_MouseLeave(object sender, MouseEventArgs e) => HeaderButtons.Opacity = 0.35;
+    private void Header_MouseLeave(object sender, MouseEventArgs e) => HeaderButtons.Opacity = 0.72;
 
     private void DragHandle_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -402,11 +710,37 @@ public partial class StickyNoteWindow : Window
         DragDrop.DoDragDrop((DependencyObject)sender, _dragItemId.Value, DragDropEffects.Move);
     }
 
+    private void TaskRow_DragOver(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(typeof(Guid)) || sender is not Border row ||
+            row.DataContext is not ChecklistItem target || (Guid)e.Data.GetData(typeof(Guid)) == target.Id)
+        {
+            e.Effects = DragDropEffects.None;
+            return;
+        }
+        var insertAfter = e.GetPosition(row).Y >= row.ActualHeight / 2;
+        row.BorderBrush = new SolidColorBrush(Color.FromRgb(91, 91, 214));
+        row.BorderThickness = insertAfter ? new Thickness(1, 1, 1, 3) : new Thickness(1, 3, 1, 1);
+        e.Effects = DragDropEffects.Move;
+        e.Handled = true;
+    }
+
+    private void TaskRow_DragLeave(object sender, DragEventArgs e)
+    {
+        if (sender is not Border row) return;
+        row.ClearValue(Border.BorderBrushProperty);
+        row.ClearValue(Border.BorderThicknessProperty);
+    }
+
     private async void TaskRow_Drop(object sender, DragEventArgs e)
     {
-        if (!e.Data.GetDataPresent(typeof(Guid)) || sender is not Border { DataContext: ChecklistItem target }) return;
+        if (!e.Data.GetDataPresent(typeof(Guid)) || sender is not Border { DataContext: ChecklistItem target } row) return;
         var sourceId = (Guid)e.Data.GetData(typeof(Guid));
-        await _database.ReorderItemAsync(sourceId, target.Id);
+        var insertAfter = e.GetPosition(row).Y >= row.ActualHeight / 2;
+        row.ClearValue(Border.BorderBrushProperty);
+        row.ClearValue(Border.BorderThicknessProperty);
+        _dragItemId = null;
+        await _database.ReorderItemAsync(sourceId, target.Id, insertAfter);
         await ReloadAsync();
     }
 
@@ -424,11 +758,18 @@ public partial class StickyNoteWindow : Window
             _expandedWidth = Math.Max(ActualWidth, MinWidth);
             _expandedHeight = Math.Max(ActualHeight, MinHeight);
         }
+        RememberNormalBounds();
         ScheduleLayoutSave();
     }
 
     private void Window_StateChanged(object? sender, EventArgs e)
     {
+        if (_restoringUnexpectedMaximize) return;
+        if (WindowState == WindowState.Maximized)
+        {
+            RestoreFromUnexpectedMaximize();
+            return;
+        }
         if (WindowState == WindowState.Normal && _manualMinimize)
         {
             _manualMinimize = false;
@@ -439,7 +780,52 @@ public partial class StickyNoteWindow : Window
             }
         }
         GuardDesktopVisibility();
+        _windowManager.RefreshManager();
     }
+
+    private void RestoreFromUnexpectedMaximize()
+    {
+        if (_restoringUnexpectedMaximize || WindowState == WindowState.Minimized) return;
+        _restoringUnexpectedMaximize = true;
+        try
+        {
+            var bounds = _windowDragInProgress && IsUsableBounds(_preDragBounds)
+                ? _preDragBounds
+                : IsUsableBounds(_lastNormalBounds) ? _lastNormalBounds : RestoreBounds;
+            WindowState = WindowState.Normal;
+            if (IsUsableBounds(bounds))
+            {
+                Left = bounds.Left;
+                Top = bounds.Top;
+                Width = Math.Max(MinWidth, bounds.Width);
+                Height = Note.IsCollapsed ? 96 : Math.Max(MinHeight, bounds.Height);
+            }
+            WindowNative.DisableMaximize(this);
+            ClampToVisibleWorkArea();
+            WindowNative.SnapWindow(this, _windowManager.GetSnapTargets(Note.Id));
+            RememberNormalBounds();
+            ScheduleLayoutSave();
+        }
+        finally
+        {
+            _restoringUnexpectedMaximize = false;
+        }
+    }
+
+    private void RememberNormalBounds()
+    {
+        if (!IsLoaded || WindowState != WindowState.Normal || _restoringUnexpectedMaximize) return;
+        var bounds = CurrentNormalBounds();
+        if (IsUsableBounds(bounds)) _lastNormalBounds = bounds;
+    }
+
+    private Rect CurrentNormalBounds() =>
+        new(Left, Top, Math.Max(ActualWidth, Width), Math.Max(ActualHeight, Height));
+
+    private static bool IsUsableBounds(Rect bounds) =>
+        !bounds.IsEmpty && double.IsFinite(bounds.Left) && double.IsFinite(bounds.Top) &&
+        double.IsFinite(bounds.Width) && double.IsFinite(bounds.Height) &&
+        bounds.Width > 0 && bounds.Height > 0;
 
     private async Task SaveLayoutAsync()
     {
@@ -460,6 +846,29 @@ public partial class StickyNoteWindow : Window
             WindowState = WindowState.Normal;
             WindowNative.RestoreWithoutActivation(this);
         }
+    }
+
+    private void SystemEvents_DisplaySettingsChanged(object? sender, EventArgs e) =>
+        _ = Dispatcher.InvokeAsync(ClampToVisibleWorkArea, DispatcherPriority.Loaded);
+
+    private void ClampToVisibleWorkArea()
+    {
+        if (!IsLoaded || WindowState != WindowState.Normal) return;
+        var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        var screen = Forms.Screen.FromHandle(handle);
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var workArea = screen.WorkingArea;
+        var left = workArea.Left / dpi.DpiScaleX;
+        var top = workArea.Top / dpi.DpiScaleY;
+        var width = workArea.Width / dpi.DpiScaleX;
+        var height = workArea.Height / dpi.DpiScaleY;
+        const double margin = 0;
+
+        Width = Math.Clamp(Width, MinWidth, Math.Max(MinWidth, width - margin * 2));
+        if (!Note.IsCollapsed)
+            Height = Math.Clamp(Height, MinHeight, Math.Max(MinHeight, height - margin * 2));
+        Left = Clamp(Left, left + margin, left + width - Width - margin);
+        Top = Clamp(Top, top + margin, top + height - Height - margin);
     }
 
     private async void StickyNoteWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)

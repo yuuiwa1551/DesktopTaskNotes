@@ -143,7 +143,7 @@ public sealed class DatabaseService
         return notes.FirstOrDefault();
     }
 
-    public async Task<List<NoteSummary>> GetNoteSummariesAsync(bool deletedOnly = false)
+    public async Task<List<NoteSummary>> GetNoteSummariesAsync(bool deletedOnly = false, string search = "")
     {
         await using var connection = await OpenAsync();
         var command = connection.CreateCommand();
@@ -154,9 +154,16 @@ public sealed class DatabaseService
             FROM Notes n
             LEFT JOIN Items i ON i.NoteId=n.Id
             WHERE n.DeletedAt IS {(deletedOnly ? "NOT" : string.Empty)} NULL
+              AND ($search='' OR n.Title LIKE $like OR EXISTS (
+                    SELECT 1 FROM Items matching
+                    WHERE matching.NoteId=n.Id AND matching.DeletedAt IS NULL
+                      AND (matching.Text LIKE $like OR matching.Details LIKE $like)
+                  ))
             GROUP BY n.Id
             ORDER BY n.UpdatedAt DESC;
             """;
+        command.Parameters.AddWithValue("$search", search.Trim());
+        command.Parameters.AddWithValue("$like", $"%{search.Trim()}%");
         var result = new List<NoteSummary>();
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -175,6 +182,21 @@ public sealed class DatabaseService
             });
         }
         return result;
+    }
+
+    public async Task<(int Completed, int Total)> GetProjectProgressAsync(Guid noteId)
+    {
+        await using var connection = await OpenAsync();
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(SUM(CASE WHEN IsCompleted=1 THEN 1 ELSE 0 END), 0), COUNT(*)
+            FROM Items
+            WHERE NoteId=$note AND DeletedAt IS NULL;
+            """;
+        command.Parameters.AddWithValue("$note", noteId.ToString());
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return (0, 0);
+        return (reader.GetInt32(0), reader.GetInt32(1));
     }
 
     public async Task UpdateNoteMetadataAsync(StickyNote note)
@@ -299,10 +321,16 @@ public sealed class DatabaseService
         var now = DateTimeOffset.Now;
         await using var connection = await OpenAsync();
         var command = connection.CreateCommand();
-        command.CommandText = "UPDATE Items SET DeletedAt=$now, ReminderAt=NULL, UpdatedAt=$now WHERE Id=$id;";
+        command.CommandText = "UPDATE Items SET DeletedAt=$now, UpdatedAt=$now WHERE Id=$id;";
         command.Parameters.AddWithValue("$now", ToDb(now));
         command.Parameters.AddWithValue("$id", id.ToString());
         await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task RestoreDeletedItemAsync(Guid id)
+    {
+        await ExecuteAsync("UPDATE Items SET DeletedAt=NULL, UpdatedAt=$now WHERE Id=$id;",
+            ("$now", ToDb(DateTimeOffset.Now)), ("$id", id.ToString()));
     }
 
     public async Task SetItemCompletedAsync(Guid id, bool completed)
@@ -312,7 +340,8 @@ public sealed class DatabaseService
         var command = connection.CreateCommand();
         command.CommandText = """
             UPDATE Items SET IsCompleted=$completed, CompletedAt=$completedAt,
-                ReminderNotifiedAt=CASE WHEN $completed=1 THEN COALESCE(ReminderNotifiedAt, $now) ELSE NULL END,
+                ReminderAt=CASE WHEN $completed=1 THEN NULL ELSE ReminderAt END,
+                ReminderNotifiedAt=NULL,
                 UpdatedAt=$now WHERE Id=$id;
             """;
         command.Parameters.AddWithValue("$completed", completed ? 1 : 0);
@@ -359,15 +388,55 @@ public sealed class DatabaseService
         await transaction.CommitAsync();
     }
 
-    public async Task ReorderItemAsync(Guid sourceId, Guid targetId)
+    public async Task<List<Guid>> FilterArchivedItemIdsAsync(IEnumerable<Guid> itemIds)
+    {
+        var result = new List<Guid>();
+        await using var connection = await OpenAsync();
+        foreach (var id in itemIds.Distinct())
+        {
+            var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM Items WHERE Id=$id AND ArchivedAt IS NOT NULL AND DeletedAt IS NULL;";
+            command.Parameters.AddWithValue("$id", id.ToString());
+            if (Convert.ToInt32(await command.ExecuteScalarAsync()) > 0) result.Add(id);
+        }
+        return result;
+    }
+
+    public async Task ReorderItemAsync(Guid sourceId, Guid targetId, bool insertAfter = false)
     {
         if (sourceId == targetId) return;
         await using var connection = await OpenAsync();
-        var sourceOrder = await ScalarIntAsync(connection, "SELECT SortOrder FROM Items WHERE Id=$id;", sourceId);
-        var targetOrder = await ScalarIntAsync(connection, "SELECT SortOrder FROM Items WHERE Id=$id;", targetId);
+
+        var noteLookup = connection.CreateCommand();
+        noteLookup.CommandText = "SELECT NoteId FROM Items WHERE Id=$id AND ArchivedAt IS NULL AND DeletedAt IS NULL;";
+        noteLookup.Parameters.AddWithValue("$id", sourceId.ToString());
+        var noteValue = await noteLookup.ExecuteScalarAsync();
+        if (noteValue is not string noteId) return;
+
+        var orderedLookup = connection.CreateCommand();
+        orderedLookup.CommandText = """
+            SELECT Id FROM Items
+            WHERE NoteId=$note AND ArchivedAt IS NULL AND DeletedAt IS NULL
+            ORDER BY SortOrder, CreatedAt;
+            """;
+        orderedLookup.Parameters.AddWithValue("$note", noteId);
+        var ordered = new List<Guid>();
+        await using (var reader = await orderedLookup.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync()) ordered.Add(Guid.Parse(reader.GetString(0)));
+        }
+
+        if (!ordered.Remove(sourceId)) return;
+        var targetIndex = ordered.IndexOf(targetId);
+        if (targetIndex < 0) return;
+        if (insertAfter) targetIndex++;
+        ordered.Insert(targetIndex, sourceId);
+
         await using var transaction = await connection.BeginTransactionAsync();
-        await UpdateSortAsync(connection, transaction, sourceId, targetOrder);
-        await UpdateSortAsync(connection, transaction, targetId, sourceOrder);
+        for (var index = 0; index < ordered.Count; index++)
+        {
+            await UpdateSortAsync(connection, transaction, ordered[index], (index + 1) * 10);
+        }
         await transaction.CommitAsync();
     }
 
