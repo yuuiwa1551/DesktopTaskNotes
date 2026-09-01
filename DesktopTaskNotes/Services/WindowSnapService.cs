@@ -14,7 +14,7 @@ public readonly record struct SnapRectangle(int Left, int Top, int Right, int Bo
 
 public static class WindowSnapService
 {
-    public const int DefaultSnapDistanceDip = 14;
+    public const int DefaultSnapDistanceDip = 8;
 
     public static SnapRectangle Snap(
         SnapRectangle moving,
@@ -65,55 +65,7 @@ public static class WindowSnapService
         }
 
         result = result.MoveTo(snappedLeft, snappedTop);
-        if (constrainToWorkArea) result = ClampInside(result, workArea);
-        result = ResolveCollisions(result, workArea, relevantObstacles, constrainToWorkArea);
         return constrainToWorkArea ? ClampInside(result, workArea) : result;
-    }
-
-    private static SnapRectangle ResolveCollisions(
-        SnapRectangle moving,
-        SnapRectangle workArea,
-        IReadOnlyList<SnapRectangle> obstacles,
-        bool constrainToWorkArea)
-    {
-        var result = moving;
-        var visited = new HashSet<SnapRectangle> { result };
-        var maximumIterations = Math.Max(4, obstacles.Count * 4);
-
-        for (var iteration = 0; iteration < maximumIterations; iteration++)
-        {
-            var collision = obstacles.FirstOrDefault(result.Intersects);
-            if (collision.Width == 0 || collision.Height == 0) break;
-
-            var candidates = new[]
-                {
-                    result.MoveTo(collision.Left - result.Width, result.Top),
-                    result.MoveTo(collision.Right, result.Top),
-                    result.MoveTo(result.Left, collision.Top - result.Height),
-                    result.MoveTo(result.Left, collision.Bottom)
-                }
-                .Select(candidate => constrainToWorkArea ? ClampInside(candidate, workArea) : candidate)
-                .Where(candidate => !candidate.Intersects(collision))
-                .Distinct()
-                .Select(candidate => new
-                {
-                    Rectangle = candidate,
-                    CollisionCount = obstacles.Count(candidate.Intersects),
-                    Movement = Math.Abs((long)candidate.Left - result.Left) +
-                               Math.Abs((long)candidate.Top - result.Top),
-                    WasVisited = visited.Contains(candidate)
-                })
-                .OrderBy(candidate => candidate.CollisionCount)
-                .ThenBy(candidate => candidate.WasVisited)
-                .ThenBy(candidate => candidate.Movement)
-                .FirstOrDefault();
-
-            if (candidates is null || candidates.Rectangle == result) break;
-            result = candidates.Rectangle;
-            if (!visited.Add(result) && obstacles.Any(result.Intersects)) break;
-        }
-
-        return result;
     }
 
     private static void ConsiderSnap(

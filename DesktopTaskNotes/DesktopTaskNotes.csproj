@@ -10,7 +10,7 @@
     <AssemblyName>DesktopTaskNotes</AssemblyName>
     <RootNamespace>DesktopTaskNotes</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
   </PropertyGroup>
 
   <ItemGroup>

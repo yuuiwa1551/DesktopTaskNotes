@@ -11,27 +11,32 @@ try
 
     var workArea = new SnapRectangle(0, 0, 1920, 1080);
     var edgeSnapped = WindowSnapService.Snap(
-        new SnapRectangle(8, 100, 308, 500), workArea, [], 14);
+        new SnapRectangle(6, 100, 306, 500), workArea, [], 8);
     Assert(edgeSnapped.Left == 0, "便利贴靠近屏幕左侧时应精确吸附到工作区边缘");
 
     var cornerSnapped = WindowSnapService.Snap(
-        new SnapRectangle(1610, 674, 1910, 1074), workArea, [], 14);
+        new SnapRectangle(1614, 676, 1914, 1076), workArea, [], 8);
     Assert(cornerSnapped.Right == workArea.Right && cornerSnapped.Bottom == workArea.Bottom,
         "便利贴靠近屏幕右下角时应同时贴齐两条边");
 
     var obstacle = new SnapRectangle(100, 100, 400, 500);
     var noteSnapped = WindowSnapService.Snap(
-        new SnapRectangle(408, 130, 708, 530), workArea, [obstacle], 14);
+        new SnapRectangle(406, 130, 706, 530), workArea, [obstacle], 8);
     Assert(noteSnapped.Left == obstacle.Right && !noteSnapped.Intersects(obstacle),
         "两张便利贴靠近时应吸在一起且不重叠");
 
-    var collisionResolved = WindowSnapService.Snap(
-        new SnapRectangle(350, 150, 650, 550), workArea, [obstacle], 14);
-    Assert(collisionResolved.Left == obstacle.Right && !collisionResolved.Intersects(obstacle),
-        "拖放到另一张便利贴上时应按最短方向推出碰撞区域");
+    var shallowOverlapSnapped = WindowSnapService.Snap(
+        new SnapRectangle(394, 150, 694, 550), workArea, [obstacle], 8);
+    Assert(shallowOverlapSnapped.Left == obstacle.Right && !shallowOverlapSnapped.Intersects(obstacle),
+        "轻微越过贴合线时仍应辅助吸回相邻边缘");
+
+    var intentionalOverlap = WindowSnapService.Snap(
+        new SnapRectangle(388, 150, 688, 550), workArea, [obstacle], 8);
+    Assert(intentionalOverlap.Left == 388 && intentionalOverlap.Intersects(obstacle),
+        "继续拖过软吸附距离后应允许两张便利贴重叠");
 
     var crossingMonitor = WindowSnapService.Snap(
-        new SnapRectangle(1800, 200, 2100, 600), workArea, [], 14, false);
+        new SnapRectangle(1800, 200, 2100, 600), workArea, [], 8, false);
     Assert(crossingMonitor.Left == 1800 && crossingMonitor.Right == 2100,
         "实时吸附不应把正在跨显示器拖动的便利贴锁回原屏幕");
 
@@ -123,7 +128,7 @@ try
     var restoredItems = await restoredDatabase.GetItemsForNoteAsync(project.Id);
     Assert(restoredItems.Single(i => i.Id == second.Id).Text == "第二阶段", "恢复应还原备份时的数据");
 
-    Console.WriteLine("PASS: 24 integration assertions");
+    Console.WriteLine("PASS: 25 integration assertions");
     return 0;
 }
 catch (Exception error)
